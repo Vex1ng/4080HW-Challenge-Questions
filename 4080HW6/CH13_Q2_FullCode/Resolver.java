@@ -1,0 +1,474 @@
+//> Resolving and Binding resolver
+package com.craftinginterpreters.lox;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Stack;
+
+class Resolver implements Expr.Visitor<Void>, Stmt.Visitor<Void> {
+  private final Interpreter interpreter;
+  //> scopes-field
+  private final Stack<Map<String, Variable>> scopes = new Stack<>();
+  //< scopes-field
+//> function-type-field
+  private FunctionType currentFunction = FunctionType.NONE;
+//< function-type-field
+
+  Resolver(Interpreter interpreter) {
+    this.interpreter = interpreter;
+  }
+
+  private static class Variable {
+    final Token token;
+    boolean defined;
+    boolean used;
+    final int index;
+
+    Variable(Token token, boolean defined, int index) {
+      this.token = token;
+      this.defined = defined;
+      this.used = false;
+      this.index = index;
+    }
+  }
+
+  //> function-type
+  private enum FunctionType {
+    NONE,
+    /* Resolving and Binding function-type < Classes function-type-method
+        FUNCTION
+    */
+//> Classes function-type-method
+    FUNCTION,
+    //> function-type-initializer
+    INITIALIZER,
+    //< function-type-initializer
+    METHOD
+//< Classes function-type-method
+  }
+//< function-type
+//> Classes class-type
+
+  private enum ClassType {
+    NONE,
+    /* Classes class-type < Inheritance class-type-subclass
+        CLASS
+     */
+//> Inheritance class-type-subclass
+    CLASS,
+    SUBCLASS
+//< Inheritance class-type-subclass
+  }
+
+  private ClassType currentClass = ClassType.NONE;
+
+  //< Classes class-type
+//> resolve-statements
+  void resolve(List<Stmt> statements) {
+    for (Stmt statement : statements) {
+      resolve(statement);
+    }
+  }
+  //< resolve-statements
+//> visit-block-stmt
+  @Override
+  public Void visitBlockStmt(Stmt.Block stmt) {
+    beginScope();
+    resolve(stmt.statements);
+    endScope();
+    return null;
+  }
+  //< visit-block-stmt
+//> Classes resolver-visit-class
+  @Override
+  public Void visitClassStmt(Stmt.Class stmt) {
+//> set-current-class
+    ClassType enclosingClass = currentClass;
+    currentClass = ClassType.CLASS;
+
+//< set-current-class
+    declare(stmt.name);
+    define(stmt.name);
+//> Inheritance resolve-superclass
+
+//> inherit-self
+    if (stmt.superclass != null &&
+            stmt.name.lexeme.equals(stmt.superclass.name.lexeme)) {
+      Lox.error(stmt.superclass.name,
+              "A class can't inherit from itself.");
+    }
+
+//< inherit-self
+    if (stmt.superclass != null) {
+//> set-current-subclass
+      currentClass = ClassType.SUBCLASS;
+//< set-current-subclass
+      resolve(stmt.superclass);
+    }
+//< Inheritance resolve-superclass
+//> Inheritance begin-super-scope
+
+    if (stmt.superclass != null) {
+      beginScope();
+      scopes.peek().put("super", new Variable(null, true, 0));
+    }
+//< Inheritance begin-super-scope
+//> resolve-methods
+
+    for (Stmt.Function method : stmt.staticMethods) {
+      resolveFunction(method, FunctionType.FUNCTION);
+    }
+//> resolver-begin-this-scope
+    beginScope();
+    scopes.peek().put("this",            new Variable(null, true, 0));
+    scopes.peek().put("__inner_class__", new Variable(null, true, 1));
+    scopes.peek().put("__inner_name__",  new Variable(null, true, 2));
+
+//< resolver-begin-this-scope
+    for (Stmt.Function method : stmt.methods) {
+      FunctionType declaration = FunctionType.METHOD;
+//> resolver-initializer-type
+      if (method.name.lexeme.equals("init")) {
+        declaration = FunctionType.INITIALIZER;
+      }
+
+//< resolver-initializer-type
+      resolveFunction(method, declaration); // [local]
+    }
+
+    for (Stmt.Function getter : stmt.getters) {
+      resolveFunction(getter, FunctionType.METHOD);
+    }
+
+//> resolver-end-this-scope
+    endScope();
+
+//< resolver-end-this-scope
+//< resolve-methods
+//> Inheritance end-super-scope
+    if (stmt.superclass != null) endScope();
+
+//< Inheritance end-super-scope
+//> restore-current-class
+    currentClass = enclosingClass;
+//< restore-current-class
+    return null;
+  }
+  //< Classes resolver-visit-class
+//> visit-expression-stmt
+  @Override
+  public Void visitExpressionStmt(Stmt.Expression stmt) {
+    resolve(stmt.expression);
+    return null;
+  }
+  //< visit-expression-stmt
+//> visit-function-stmt
+  @Override
+  public Void visitFunctionStmt(Stmt.Function stmt) {
+    declare(stmt.name);
+    define(stmt.name);
+
+/* Resolving and Binding visit-function-stmt < Resolving and Binding pass-function-type
+    resolveFunction(stmt);
+*/
+//> pass-function-type
+    resolveFunction(stmt, FunctionType.FUNCTION);
+//< pass-function-type
+    return null;
+  }
+  //< visit-function-stmt
+//> visit-if-stmt
+  @Override
+  public Void visitIfStmt(Stmt.If stmt) {
+    resolve(stmt.condition);
+    resolve(stmt.thenBranch);
+    if (stmt.elseBranch != null) resolve(stmt.elseBranch);
+    return null;
+  }
+  //< visit-if-stmt
+//> visit-print-stmt
+  @Override
+  public Void visitPrintStmt(Stmt.Print stmt) {
+    resolve(stmt.expression);
+    return null;
+  }
+  //< visit-print-stmt
+//> visit-return-stmt
+  @Override
+  public Void visitReturnStmt(Stmt.Return stmt) {
+//> return-from-top
+    if (currentFunction == FunctionType.NONE) {
+      Lox.error(stmt.keyword, "Can't return from top-level code.");
+    }
+
+//< return-from-top
+    if (stmt.value != null) {
+//> Classes return-in-initializer
+      if (currentFunction == FunctionType.INITIALIZER) {
+        Lox.error(stmt.keyword,
+                "Can't return a value from an initializer.");
+      }
+
+//< Classes return-in-initializer
+      resolve(stmt.value);
+    }
+
+    return null;
+  }
+  //< visit-return-stmt
+//> visit-var-stmt
+  @Override
+  public Void visitVarStmt(Stmt.Var stmt) {
+    declare(stmt.name);
+    if (stmt.initializer != null) {
+      resolve(stmt.initializer);
+    }
+    define(stmt.name);
+    return null;
+  }
+  //< visit-var-stmt
+//> visit-while-stmt
+  @Override
+  public Void visitWhileStmt(Stmt.While stmt) {
+    resolve(stmt.condition);
+    resolve(stmt.body);
+    return null;
+  }
+
+  @Override
+  public Void visitBreakStmt(Stmt.Break stmt) {
+    return null;
+  }
+
+  //< visit-while-stmt
+//> visit-assign-expr
+  @Override
+  public Void visitAssignExpr(Expr.Assign expr) {
+    resolve(expr.value);
+    resolveLocal(expr, expr.name);
+    return null;
+  }
+  //< visit-assign-expr
+//> visit-binary-expr
+  @Override
+  public Void visitBinaryExpr(Expr.Binary expr) {
+    resolve(expr.left);
+    resolve(expr.right);
+    return null;
+  }
+  //< visit-binary-expr
+//> visit-call-expr
+  @Override
+  public Void visitCallExpr(Expr.Call expr) {
+    resolve(expr.callee);
+
+    for (Expr argument : expr.arguments) {
+      resolve(argument);
+    }
+
+    return null;
+  }
+  //< visit-call-expr
+//> Classes resolver-visit-get
+  @Override
+  public Void visitGetExpr(Expr.Get expr) {
+    resolve(expr.object);
+    return null;
+  }
+  //< Classes resolver-visit-get
+//> visit-grouping-expr
+  @Override
+  public Void visitGroupingExpr(Expr.Grouping expr) {
+    resolve(expr.expression);
+    return null;
+  }
+  //< visit-grouping-expr
+//> visit-literal-expr
+  @Override
+  public Void visitLiteralExpr(Expr.Literal expr) {
+    return null;
+  }
+  //< visit-literal-expr
+//> visit-logical-expr
+  @Override
+  public Void visitLogicalExpr(Expr.Logical expr) {
+    resolve(expr.left);
+    resolve(expr.right);
+    return null;
+  }
+  //< visit-logical-expr
+//> Classes resolver-visit-set
+  @Override
+  public Void visitSetExpr(Expr.Set expr) {
+    resolve(expr.value);
+    resolve(expr.object);
+    return null;
+  }
+  //< Classes resolver-visit-set
+//> Inheritance resolve-super-expr
+  @Override
+  public Void visitSuperExpr(Expr.Super expr) {
+    Lox.error(expr.keyword, "'super' is removed. Use 'inner' instead.");
+    return null;
+  }
+  //< Inheritance resolve-super-expr
+//> Classes resolver-visit-this
+  @Override
+  public Void visitThisExpr(Expr.This expr) {
+//> this-outside-of-class
+    if (currentClass == ClassType.NONE) {
+      Lox.error(expr.keyword,
+              "Can't use 'this' outside of a class.");
+      return null;
+    }
+
+//< this-outside-of-class
+    resolveLocal(expr, expr.keyword);
+    return null;
+  }
+
+  //< Classes resolver-visit-this
+//> visit-unary-expr
+  @Override
+  public Void visitUnaryExpr(Expr.Unary expr) {
+    resolve(expr.right);
+    return null;
+  }
+  //< visit-unary-expr
+//> visit-variable-expr
+  @Override
+  public Void visitVariableExpr(Expr.Variable expr) {
+    if (!scopes.isEmpty() &&
+            scopes.peek().containsKey(expr.name.lexeme) &&
+            !scopes.peek().get(expr.name.lexeme).defined) {
+      Lox.error(expr.name,
+              "Can't read local variable in its own initializer.");
+    }
+
+    resolveLocal(expr, expr.name);
+    return null;
+  }
+
+  @Override
+  public Void visitConditionalExpr(Expr.Conditional expr) {
+    resolve(expr.condition);
+    resolve(expr.thenBranch);
+    resolve(expr.elseBranch);
+    return null;
+  }
+
+  @Override
+  public Void visitLambdaExpr(Expr.Lambda expr) {
+    beginScope();
+    for (Token param : expr.parameters) {
+      declare(param);
+      define(param);
+    }
+    resolve(expr.body);
+    endScope();
+    return null;
+  }
+
+  @Override
+  public Void visitInnerExpr(Expr.Inner expr) {
+    if (currentClass == ClassType.NONE) {
+      Lox.error(expr.keyword, "Can't use 'inner' outside of a class.");
+      return null;
+    }
+    if (currentFunction != FunctionType.METHOD &&
+            currentFunction != FunctionType.INITIALIZER) {
+      Lox.error(expr.keyword, "Can't use 'inner' in a static method.");
+      return null;
+    }
+    // Resolve to the depth of 'this' — slots 0/1/2 live in that same environment.
+    Token syntheticThis = new Token(TokenType.THIS, "this", null, expr.keyword.line);
+    resolveLocal(expr, syntheticThis);
+    for (Expr arg : expr.arguments) resolve(arg);
+    return null;
+  }
+
+  //< visit-variable-expr
+//> resolve-stmt
+  private void resolve(Stmt stmt) {
+    stmt.accept(this);
+  }
+  //< resolve-stmt
+//> resolve-expr
+  private void resolve(Expr expr) {
+    expr.accept(this);
+  }
+  //< resolve-expr
+//> resolve-function
+/* Resolving and Binding resolve-function < Resolving and Binding set-current-function
+  private void resolveFunction(Stmt.Function function) {
+*/
+//> set-current-function
+  private void resolveFunction(
+          Stmt.Function function, FunctionType type) {
+    FunctionType enclosingFunction = currentFunction;
+    currentFunction = type;
+
+//< set-current-function
+    beginScope();
+    for (Token param : function.params) {
+      declare(param);
+      define(param);
+    }
+    resolve(function.body);
+    endScope();
+//> restore-current-function
+    currentFunction = enclosingFunction;
+//< restore-current-function
+  }
+  //< resolve-function
+//> begin-scope
+  private void beginScope() {
+    scopes.push(new HashMap<String, Variable>());
+  }
+  //< begin-scope
+//> end-scope
+  private void endScope() {
+    Map<String, Variable> scope = scopes.pop();
+    for (Map.Entry<String, Variable> entry : scope.entrySet()) {
+      if (entry.getValue().token != null && !entry.getValue().used) {
+        Lox.error(entry.getValue().token,
+                "Local variable '" + entry.getKey() + "' is never used.");
+      }
+    }
+  }
+  //< end-scope
+//> declare
+  private void declare(Token name) {
+    if (scopes.isEmpty()) return;
+
+    Map<String, Variable> scope = scopes.peek();
+//> duplicate-variable
+    if (scope.containsKey(name.lexeme)) {
+      Lox.error(name,
+              "Already a variable with this name in this scope.");
+    }
+
+//< duplicate-variable
+    scope.put(name.lexeme, new Variable(name, false, scope.size()));
+  }
+  //< declare
+//> define
+  private void define(Token name) {
+    if (scopes.isEmpty()) return;
+    scopes.peek().get(name.lexeme).defined = true;
+  }
+  //< define
+//> resolve-local
+  private void resolveLocal(Expr expr, Token name) {
+    for (int i = scopes.size() - 1; i >= 0; i--) {
+      if (scopes.get(i).containsKey(name.lexeme)) {
+        Variable variable = scopes.get(i).get(name.lexeme);
+        variable.used = true;
+        interpreter.resolve(expr, scopes.size() - 1 - i, variable.index);
+        return;
+      }
+    }
+  }
+//< resolve-local
+}
